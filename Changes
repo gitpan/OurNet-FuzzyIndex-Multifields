@@ -2,3 +2,8 @@ Revision history for Perl extension OurNet::FuzzyIndex::Multifields.
 
 0.01  Tue, 28 Sep 2004 23:02:24 +0800
 	- version 0.01
+
+0.02  Wed, 29 Sep 2004 22:34:59 +0800
+	- version 0.02
+	- added cache for query result
+	- reorganized document

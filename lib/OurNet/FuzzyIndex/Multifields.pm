@@ -3,11 +3,15 @@ package OurNet::FuzzyIndex::Multifields;
 use strict;
 use warnings;
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 
 #use Data::Dumper;
-use OurNet::FuzzyIndex;
+
+use DB_File;
+use Storable;
+use FreezeThaw qw(freeze thaw);
 use Exporter::Lite;
+use OurNet::FuzzyIndex;
 our @EXPORT = qw($MATCH_FUZZY $MATCH_EXACT $MATCH_PART $MATCH_NOT);
 
 
@@ -18,20 +22,39 @@ our @EXPORT = qw($MATCH_FUZZY $MATCH_EXACT $MATCH_PART $MATCH_NOT);
 OurNet::FuzzyIndex::Multifields - Multifield indexing extension to
 OurNet::FuzzyIndex
 
-=head1 SYNOPSIS
+=head1 DESCRIPTION
+
+B<OurNet::FuzzyIndex::Multifields> adds extended features to
+L<OurNet::FuzzyIndex> by indexing multifield documents. The basic
+usage is much like that of L<OurNet::FuzzyIndex>. Please refer to it.
+
+A simple linear combination of multifields' scores is used as the
+scoring function of query result.
+
+
+=head1 USAGE
 
  use OurNet::FuzzyIndex::Multifields;
 
- # Initiate indexer
+=head2 Initiate indexer
+
  my $inx = OurNet::FuzzyIndex::Multifields->new(
 					       inxdir => './index',
 					       fields => [qw(title fulltext)],
 					       weight => [qw(3 1)],
+
+					       # refer to OurNet::FuzzyIndex
+					       # for the following options.
+					       pagesize => undef,
+					       cache => undef,
 					       subdbs => 3,
 					      );
 
 =cut
 
+use fields qw(
+	      inxdir fields weight mainfield inxdb cache use_cache
+	      );
 sub new {
     my $class = shift;
     my %arg = @_;
@@ -45,12 +68,27 @@ sub new {
 					     $arg{subdbs},
 					     );
     }
+    my %cache;
+    if($arg{use_cache}){
+	mkdir "$arg{inxdir}/cache";
+	foreach my $f (@{$arg{fields}}){
+	    $cache{$f} = {1,1};
+	    tie
+		%{$cache{$f}}, 'DB_File',
+		"$arg{inxdir}/cache/$f", O_CREAT | O_RDWR, 0644, $DB_BTREE
+		or die "Cannot create cache file <$f>: $!";
+	}
+    }
+
+
     bless {
 	inxdir => $arg{inxdir},
 	fields => $arg{fields},
 	weight => { map{ $arg{fields}->[$_] => ($arg{weight}->[$_] || 1)} 0..$#{$arg{weight}} },
 	mainfield => $arg{fields}->[0],
 	inxdb => \%inxdb,
+	cache => \%cache,
+	use_cache => $arg{use_cache},
     }, $class;
 }
 
@@ -58,9 +96,9 @@ sub parse { $_[0]->{inxdb}->{$_[0]->{mainfield}}->parse(@_) }
 sub parse_xs { $_[0]->{inxdb}->{$_[0]->{mainfield}}->parse_xs(@_) }
 
 
-=pod
 
- # Insert document
+=head2 Insert documents
+
  $inx->insert(
 	     0, # document key
 	     title => 'This is the title',
@@ -86,9 +124,9 @@ sub insert {
     }
 }
 
-=pod
 
- # Perform a query
+=head2  Perform a query
+
  %result = $inx->query(
     'search for some text in title',
     [qw(title)], # search title only
@@ -98,8 +136,20 @@ sub insert {
  # Perform another query
  %result = $inx->query(
     'search for some text',
-    '*',  # for all fields too
+    '*',  # for all fields, or you can set it to undef
   );
+
+
+If you need to cache query results, you can set the option
+B<use_cache> to 1 with the constructor like
+
+ my $inx = OurNet::FuzzyIndex::Multifields->new(
+					       inxdir => './index',
+					       fields => [qw(title fulltext)],
+					       weight => [qw(3 1)],
+					       subdbs => 3,
+					       use_cache => 1,
+					      );
 
 =cut
 
@@ -113,12 +163,26 @@ sub query {
 
     my %pfr; # per-field result
     my %score;
+
+    no warnings;
     foreach my $f (@subfields){
 #	print "<$f>\n";
-	my %r = $self->{inxdb}->{$f}->query($query, $flag);
-	$pfr{$f} = \%r;
+	my $r = {};
+	if( exists($self->{cache}{$f}{join qq/\x0/, $query, $flag}) ){
+#	    print "....... Thawing ......\n";
+	    ($r) = thaw( # must be in a list context here........ :-[
+			$self->{cache}{$f}{join qq/\x0/, $query, $flag}
+			);
+	}
+	if(!%$r){
+	    %$r = $self->{inxdb}->{$f}->query($query, $flag);
+	    if(!exists($self->{cache}{$f}{join qq/\x0/, $query, $flag})) {
+		$self->{cache}{$f}{join qq/\x0/, $query, $flag} = freeze($r);
+	    }
+	}
+	$pfr{$f} = $r;
 	# keep record of retrieved index keys
-	while(my($k, undef) = each %r){
+	while(my($k, undef) = each %$r){
 	    $score{$k} = undef;
 	}
     }
@@ -137,10 +201,31 @@ sub query {
 }
 
 
+=head2 REMOVE CACHE
+
+ $inx->remove_cache();
+
+It deletes the temporary result in the cache file.
+
+=cut
+
+
+sub remove_cache {
+    my $self = shift;
+    if($self->{use_cache}){
+      foreach my $f (@{$self->{fields}}){
+	%{$self->{cache}{$f}} = ();
+      }
+    }
+}
+
 sub DESTROY {
     my $self = shift;
     foreach my $d (values %{$self->{inxdb}}){
         $d->DESTROY;
+    }
+    foreach my $f (@{$self->{fields}}){
+	untie %{$self->{cache}{$f}};
     }
     undef $self;
 }
@@ -149,15 +234,6 @@ sub DESTROY {
 1;
 __END__
 # Below is stub documentation for your module. You'd better edit it!
-
-=head1 DESCRIPTION
-
-B<OurNet::FuzzyIndex::Multifields> adds extended features to
-L<OurNet::FuzzyIndex> by indexing multifield documents. The basic
-usage is much like that of L<OurNet::FuzzyIndex>. Please refer to it.
-
-A simple linear combination of multifields' scores is used as the
-scoring function of query result.
 
 
 =head1 SEE ALSO
