@@ -1,0 +1,7 @@
+Changes
+Makefile.PL
+MANIFEST
+README
+t/OurNet-FuzzyIndex-Multifields.t
+lib/OurNet/FuzzyIndex/Multifields.pm
+META.yml                                 Module meta-data (added by MakeMaker)
